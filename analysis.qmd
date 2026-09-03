@@ -144,3 +144,198 @@ fire_map |>
     lat2 = max(all_latitudes)
   )
 ```
+
+```{r}
+imdb_snapshots <- readRDS("data/imdb_snapshots.rds") |>
+  tibble::as_tibble()
+print(imdb_snapshots)
+print(imdb_snapshots |> dplyr::count(snap_year))
+```
+
+```{r}
+rank_changes <- imdb_snapshots |>
+  dplyr::filter(snap_year %in% c(2015, 2022)) |>
+  dplyr::select(title, year, snap_year, rank) |>
+  tidyr::pivot_wider(
+    names_from = snap_year,
+    values_from = rank,
+    names_prefix = "rank_"
+  ) |>
+  dplyr::filter(!is.na(rank_2015), !is.na(rank_2022)) |>
+  dplyr::mutate(
+    rank_change = abs(rank_2022 - rank_2015),
+    release_decade = (year %/% 10) * 10
+  ) |>
+  dplyr::arrange(dplyr::desc(rank_change)) |>
+  dplyr::slice_head(n = 10)
+print(rank_changes)
+```
+
+```{r}
+average_rank_change <- rank_changes |>
+  dplyr::group_by(release_decade) |>
+  dplyr::summarise(
+    average_rank_change = mean(rank_change),
+    .groups = "drop"
+  ) |>
+  dplyr::arrange(release_decade)
+print(average_rank_change)
+```
+
+```{r}
+nolan_films <- c(
+  "The Dark Knight", "Inception", "Interstellar",
+  "The Dark Knight Rises", "Memento", "The Prestige", "Batman Begins"
+)
+
+nolan_ranks <- imdb_snapshots |>
+  dplyr::filter(title %in% nolan_films) |>
+  dplyr::select(title, snap_year, rank) |>
+  tidyr::pivot_wider(
+    names_from = snap_year,
+    values_from = rank,
+    names_prefix = "rank_"
+  )
+print(nolan_ranks)
+```
+
+```{r}
+interstellar_ranks <- imdb_snapshots |>
+  dplyr::filter(title == "Interstellar")
+
+ggplot2::ggplot(
+  interstellar_ranks,
+  ggplot2::aes(x = snap_year, y = rank)
+) +
+  ggplot2::geom_col() +
+  ggplot2::labs(
+    title = "Interstellar Rank by Snapshot Year",
+    x = "Snapshot year",
+    y = "Rank"
+  )
+```
+
+```{r}
+film_snapshot_counts <- imdb_snapshots |>
+  dplyr::count(title, name = "snapshot_count")
+print(film_snapshot_counts)
+
+snapshot_count_distribution <- film_snapshot_counts |>
+  dplyr::count(snapshot_count, name = "film_count")
+
+ggplot2::ggplot(
+  snapshot_count_distribution,
+  ggplot2::aes(x = snapshot_count, y = film_count)
+) +
+  ggplot2::geom_col() +
+  ggplot2::labs(
+    title = "Distribution of Film Snapshot Counts",
+    x = "Number of snapshots",
+    y = "Number of films"
+  )
+```
+
+```{r}
+#| cache: true
+snap_urls <- c(
+  "https://web.archive.org/web/20150101/https://www.imdb.com/chart/top/",
+  "https://web.archive.org/web/20170101/https://www.imdb.com/chart/top/",
+  "https://web.archive.org/web/20190101/https://www.imdb.com/chart/top/",
+  "https://web.archive.org/web/20210101/https://www.imdb.com/chart/top/",
+  "https://web.archive.org/web/20220201012049/https://www.imdb.com/chart/top/"
+)
+snap_years <- c(2015, 2017, 2019, 2021, 2022)
+
+scrape_snapshot <- function(url, snap_year) {
+  page <- httr2::request(url) |>
+    httr2::req_timeout(60) |>
+    httr2::req_retry(max_tries = 3, backoff = ~ 5) |>
+    httr2::req_perform() |>
+    httr2::resp_body_html()
+  tbl <- page |>
+    rvest::html_element("table") |>
+    rvest::html_table()
+  attr_vals <- page |>
+    rvest::html_elements("td strong") |>
+    rvest::html_attr("title")
+
+  tbl |>
+    dplyr::select(
+      rank_title_year = `Rank & Title`,
+      rating = `IMDb Rating`
+    ) |>
+    dplyr::mutate(
+      rank_title_year = stringr::str_replace_all(rank_title_year, "\n +", " "),
+      number = stringr::str_extract(
+        attr_vals,
+        "(?<=based on )[0-9,]+"
+      ) |>
+        readr::parse_number()
+    ) |>
+    tidyr::separate_wider_regex(
+      rank_title_year,
+      patterns = c(
+        rank = "\\d+", "\\. ",
+        title = ".+", " +\\(",
+        year = "\\d+", "\\)"
+      )
+    ) |>
+    dplyr::mutate(
+      rank = as.integer(rank),
+      year = as.integer(year),
+      snap_year = snap_year
+    ) |>
+    dplyr::select(snap_year, rank, title, year, rating, number)
+}
+
+imdb_snapshots <- purrr::map2(snap_urls, snap_years, scrape_snapshot) |>
+  purrr::list_rbind()
+```
+
+```{r}
+imdb_snapshots |>
+  dplyr::filter(snap_year %in% c(2015, 2022)) |>
+  dplyr::select(snap_year, title, year, rank) |>
+  tidyr::pivot_wider(
+    names_from = snap_year,
+    values_from = rank,
+    names_prefix = "rank_"
+  ) |>
+  tidyr::drop_na() |>
+  dplyr::mutate(
+    rank_change = rank_2015 - rank_2022,
+    decade = paste0((year %/% 10) * 10, "s")
+  ) |>
+  dplyr::group_by(decade) |>
+  dplyr::summarise(
+    average_rank_change = mean(rank_change),
+    .groups = "drop"
+  ) |>
+  dplyr::mutate(
+    direction = dplyr::if_else(
+      average_rank_change > 0,
+      "Rose",
+      "Fell"
+    )
+  ) |>
+  ggplot2::ggplot(
+    ggplot2::aes(
+      x = average_rank_change,
+      y = decade,
+      fill = direction
+    )
+  ) +
+  ggplot2::geom_col() +
+  ggplot2::geom_vline(xintercept = 0, linewidth = 0.8) +
+  ggplot2::scale_fill_manual(
+    values = c(Rose = "#2a9d8f", Fell = "#e76f51"),
+    name = "Direction"
+  ) +
+  ggplot2::labs(
+    title = "Classic Films Slide, 1990s Films Hold Steady",
+    subtitle = "Average rank change in the IMDb Top 250, 2015 to 2022",
+    x = "Average rank change (positive = rose)",
+    y = "Film release decade",
+    caption = "Films appearing in both 2015 and 2022 snapshots. n = 190 films."
+  )
+```
